@@ -1,23 +1,36 @@
 package com.example;
 
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.IntegerSerializer;
+import org.apache.kafka.common.serialization.LongSerializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.amqp.core.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ImageBanner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.expression.common.LiteralExpression;
+import org.springframework.integration.annotation.ServiceActivator;
+import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.dsl.IntegrationFlow;
 import org.springframework.integration.dsl.IntegrationFlows;
-import org.springframework.integration.dsl.channel.MessageChannels;
-import org.springframework.integration.dsl.file.Files;
 import org.springframework.integration.file.FileHeaders;
+import org.springframework.integration.file.dsl.Files;
+import org.springframework.integration.ftp.dsl.Ftp;
 import org.springframework.integration.ftp.session.DefaultFtpSessionFactory;
+import org.springframework.integration.kafka.outbound.KafkaProducerMessageHandler;
 import org.springframework.integration.transformer.GenericTransformer;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.kafka.support.converter.StringJsonMessageConverter;
+import org.springframework.kafka.support.serializer.JsonSerializer;
 import org.springframework.messaging.Message;
-import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHandler;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.util.ReflectionUtils;
 
@@ -25,6 +38,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.HashMap;
+import java.util.Map;
 
 @SpringBootApplication
 public class FilesIntegrationApplication {
@@ -33,7 +48,7 @@ public class FilesIntegrationApplication {
 
     @Bean
     DefaultFtpSessionFactory ftpFileSessionFactory(
-            @Value("${ftp.port:2121}") int port,
+            @Value("${ftp.port:21210}") int port,
             @Value("${ftp.username:jlong}") String username,
             @Value("${ftp.password:spring}") String pw) {
         DefaultFtpSessionFactory ftpSessionFactory = new DefaultFtpSessionFactory();
@@ -44,8 +59,33 @@ public class FilesIntegrationApplication {
     }
 
     @Bean
+    public Map<String, Object> producerNonTransactionalConfigs() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.put(ProducerConfig.RETRIES_CONFIG, 3);
+        props.put(ProducerConfig.CLIENT_ID_CONFIG, "id");
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+
+        return props;
+    }
+
+    @Bean
+    public ProducerFactory<String, String> producerNonTransactionalAbstractMessageFactory() {
+        return new DefaultKafkaProducerFactory<>(producerNonTransactionalConfigs());
+    }
+
+    @Bean
+    public KafkaTemplate<String, String> kafkaTemplate() {
+        KafkaTemplate<String, String> template = new KafkaTemplate<>(producerNonTransactionalAbstractMessageFactory());
+        template.setMessageConverter(new StringJsonMessageConverter());
+        return template;
+    }
+
+    @Bean
     Exchange exchange() {
-        return ExchangeBuilder.directExchange(this.ascii).durable().build();
+        return ExchangeBuilder.directExchange(this.ascii).durable(false).build();
     }
 
     @Bean
@@ -62,17 +102,15 @@ public class FilesIntegrationApplication {
     }
 
     @Bean
-    IntegrationFlow amqp(AmqpTemplate amqpTemplate) {
-        return IntegrationFlows.from(this.asciiProcessors())
-                .handleWithAdapter(adapters ->
-                        adapters.amqp(amqpTemplate)
-                                .exchangeName(this.ascii)
-                                .routingKey(this.ascii))
+    IntegrationFlow kafka(KafkaTemplate<String, String> kafkaTemplate) {
+        return IntegrationFlows.from(producerChannel())
+                .handle(message -> kafkaTemplate.send(this.ascii, (String) message.getHeaders().get(FileHeaders.FILENAME)))
                 .get();
     }
 
+
     @Bean
-    IntegrationFlow files(@Value("${input-directory:${HOME}/Desktop/in}") File in,
+    IntegrationFlow files(@Value("${input-directory:C:/Users/kondratenko_yg/Desktop/in}") File in,
                           Environment environment) {
 
         GenericTransformer<File, Message<String>> fileStringGenericTransformer = (File source) -> {
@@ -91,18 +129,18 @@ public class FilesIntegrationApplication {
         };
 
         return IntegrationFlows
-                .from(Files.inboundAdapter(in).autoCreateDirectory(true).preventDuplicates().patternFilter("*.jpg"),
+                .from(Files.inboundAdapter(in).autoCreateDirectory(true).preventDuplicates(false).patternFilter("*.jpg"),
                         poller -> poller.poller(pm -> pm.fixedRate(1000)))
                 .transform(File.class, fileStringGenericTransformer)
-                .channel(this.asciiProcessors())
+                .channel(producerChannel())
                 .get();
     }
 
 
     @Bean
     IntegrationFlow ftp(DefaultFtpSessionFactory ftpSessionFactory) {
-        return IntegrationFlows.from(this.asciiProcessors())
-                .handleWithAdapter(adapters -> adapters.ftp(ftpSessionFactory)
+        return IntegrationFlows.from(this.producerChannel())
+                .handle(Ftp.outboundAdapter(ftpSessionFactory)
                         .remoteDirectory("uploads")
                         .fileNameGenerator(message -> {
                             Object o = message.getHeaders().get(FileHeaders.FILENAME);
@@ -114,8 +152,8 @@ public class FilesIntegrationApplication {
     }
 
     @Bean
-    MessageChannel asciiProcessors() {
-        return MessageChannels.publishSubscribe().get();
+    public DirectChannel producerChannel() {
+        return new DirectChannel();
     }
 
 

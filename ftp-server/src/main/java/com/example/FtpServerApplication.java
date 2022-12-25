@@ -43,7 +43,7 @@ public class FtpServerApplication {
     public static class FtpServerConfiguration {
 
         @Bean
-        UserManager userManager(FtpUserRepository r, @Value("${ftp.root:${HOME}/Desktop/ftp}") File root) {
+        UserManager userManager(FtpUserRepository r, @Value("${ftp.root:C:/Users/kondratenko_yg/Desktop/ftp}") File root) {
             isTrue(root.exists() || root.mkdirs());
             return new FtpUserManager(r, root);
         }
@@ -57,7 +57,7 @@ public class FtpServerApplication {
         }
 
         @Bean
-        Listener nioListener(@Value("${ftp.port:2121}") int port) throws Exception {
+        Listener nioListener(@Value("${ftp.port:21210}") int port) throws Exception {
             ListenerFactory listenerFactory = new ListenerFactory();
             listenerFactory.setPort(port);
             return listenerFactory.createListener();
